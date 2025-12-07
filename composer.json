@@ -1,0 +1,62 @@
+{
+    "name": "mischasigtermans/laravel-toon",
+    "description": "Token-Optimized Object Notation encoder/decoder for Laravel with intelligent nested object handling",
+    "keywords": [
+        "laravel",
+        "toon",
+        "token-optimization",
+        "ai",
+        "llm",
+        "mcp",
+        "json-alternative"
+    ],
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Mischa Sigtermans",
+            "email": "mischa@sigtermans.me"
+        }
+    ],
+    "require": {
+        "php": "^8.2",
+        "illuminate/support": "^9.0|^10.0|^11.0|^12.0"
+    },
+    "require-dev": {
+        "laravel/pint": "^1.20",
+        "orchestra/testbench": "^8.31|^9.0|^10.0",
+        "pestphp/pest": "^2.36|^3.0",
+        "pestphp/pest-plugin-laravel": "^2.4|^3.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "MischaSigtermans\\Toon\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "MischaSigtermans\\Toon\\Tests\\": "tests/"
+        }
+    },
+    "scripts": {
+        "test": "vendor/bin/pest",
+        "format": "vendor/bin/pint"
+    },
+    "config": {
+        "sort-packages": true,
+        "allow-plugins": {
+            "pestphp/pest-plugin": true
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "MischaSigtermans\\Toon\\ToonServiceProvider"
+            ],
+            "aliases": {
+                "Toon": "MischaSigtermans\\Toon\\Facades\\Toon"
+            }
+        }
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}
