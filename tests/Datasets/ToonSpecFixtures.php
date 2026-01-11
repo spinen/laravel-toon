@@ -20,8 +20,8 @@ function toonSpecDataset(string $fixture): array
     $projectRoot = dirname(__DIR__, 2);
 
     $file = $projectRoot
-        . '/node_modules/@toon-format/spec/tests/fixtures/'
-        . $fixture;
+        .'/node_modules/@toon-format/spec/tests/fixtures/'
+        .$fixture;
 
     try {
         if (! is_file($file)) {
@@ -47,9 +47,9 @@ function toonSpecDataset(string $fixture): array
 
         return array_map(
             static fn (array $s) => [
-                'input'       => $s['input'],
-                'expected'    => $s['expected'] ?? null,
-                'options'     => $s['options'] ?? [],
+                'input' => $s['input'],
+                'expected' => $s['expected'] ?? null,
+                'options' => $s['options'] ?? [],
                 'shouldError' => $s['shouldError'] ?? false,
             ],
             $testsByName
@@ -58,8 +58,8 @@ function toonSpecDataset(string $fixture): array
         // Surface loader errors as a single dataset entry
         return [
             $e->getMessage() => [
-                'input'       => '',
-                'expected'    => false,
+                'input' => '',
+                'expected' => false,
             ],
         ];
     }
