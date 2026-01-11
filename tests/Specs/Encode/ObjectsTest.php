@@ -9,7 +9,7 @@ it(
     function (
         mixed $input,
         mixed $expected,
-        array $options,
+        array $options = [],
         bool $shouldError = false,
     ) {
         expect(Toon::encode($input))
@@ -28,8 +28,30 @@ it(
                 'options' => $s['options'] ?? [],
                 'shouldError' => $s['shouldError'] ?? false,
             ],
-            array_column(json_decode(file_get_contents(
-                __DIR__.'/../../../node_modules/@toon-format/spec/tests/fixtures/encode/objects.json'
-            ), true)['tests'], null, 'name'))
+            (function (): array {
+                try {
+                    if (! file_exists($file = __DIR__.'/../../../node_modules/@toon-format/spec/tests/fixtures/encode/objects.json')) {
+                        throw new \Exception("Spec file [{$file}] not found");
+                    }
+
+                    return array_column(
+                        json_decode(
+                            file_get_contents($file),
+                            true,
+                            flags: JSON_THROW_ON_ERROR,
+                        )['tests'],
+                        null,
+                        'name'
+                    );
+                } catch (\Exception $e) {
+                    return [
+                        $e->getMessage() => [
+                            'input' => '',
+                            'expected' => false,
+                        ],
+                    ];
+                }
+            })()
+        )
     )
     ->group('spec', 'encode');
