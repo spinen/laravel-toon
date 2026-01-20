@@ -60,7 +60,7 @@ it('only works with nested data', function () {
 
     $toon = Toon::only($data, ['id', 'name']);
 
-    expect($toon)->toContain('items[2]{id,name}:');
+    expect($toon)->toContain('[2]{id,name}:');
     expect($toon)->toContain('1,Alice');
     expect($toon)->toContain('2,Bob');
     expect($toon)->not->toContain('email');

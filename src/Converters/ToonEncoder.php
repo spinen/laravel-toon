@@ -107,12 +107,16 @@ class ToonEncoder
                     return $this->flattenedToToon($flattened, $depth, $parentKey);
                 }
 
-                if ($this->isArrayOfUniformObjects($value)) {
+                if ($this->isArrayOfUniformPrimitiveObjects($value)) {
                     return $this->arrayOfObjectsToToon($value, $depth, $parentKey);
                 }
 
                 if ($this->isArrayOfPrimitives($value)) {
                     return $this->inlinePrimitiveArrayToToon($value, $depth, $parentKey);
+                }
+
+                if ($this->needsListFormat($value)) {
+                    return $this->listFormatArrayToToon($value, $depth, $parentKey);
                 }
 
                 return $this->sequentialArrayToToon($value, $depth);
@@ -131,7 +135,7 @@ class ToonEncoder
         $columns = array_map(fn ($col) => $this->encodeKey($col), $flattened['columns']);
         $rows = $flattened['rows'];
 
-        $keyPart = $parentKey !== null ? $this->encodeKey($parentKey) : 'items';
+        $keyPart = $parentKey !== null ? $this->encodeKey($parentKey) : ($depth === 0 ? '' : 'items');
         $header = $indentStr.$keyPart.'['.$this->getArrayLengthMarker(count($rows)).']{'.implode($this->delimiter, $columns).'}:';
 
         $rowLines = array_map(
@@ -147,7 +151,7 @@ class ToonEncoder
         $indentStr = str_repeat(' ', $this->indent * $depth);
         $rowIndent = str_repeat(' ', $this->indent * ($depth + 1));
 
-        $keyPart = $parentKey !== null ? $this->encodeKey($parentKey) : 'items';
+        $keyPart = $parentKey !== null ? $this->encodeKey($parentKey) : ($depth === 0 ? '' : 'items');
 
         if (empty($arr)) {
             return $indentStr.$keyPart.'[0]{}:';
@@ -170,7 +174,7 @@ class ToonEncoder
     protected function inlinePrimitiveArrayToToon(array $arr, int $depth, ?string $parentKey = null): string
     {
         $indentStr = str_repeat(' ', $this->indent * $depth);
-        $keyPart = $parentKey !== null ? $this->encodeKey($parentKey) : 'items';
+        $keyPart = $parentKey !== null ? $this->encodeKey($parentKey) : ($depth === 0 ? '' : 'items');
 
         $values = array_map(fn ($v) => $this->encodePrimitive($v), $arr);
 
@@ -204,6 +208,185 @@ class ToonEncoder
         return implode("\n", $lines);
     }
 
+    protected function listFormatArrayToToon(array $arr, int $depth, ?string $parentKey = null): string
+    {
+        $indentStr = str_repeat(' ', $this->indent * $depth);
+        $itemIndent = str_repeat(' ', $this->indent * ($depth + 1));
+        $keyPart = $parentKey !== null ? $this->encodeKey($parentKey) : ($depth === 0 ? '' : 'items');
+
+        $header = $indentStr.$keyPart.'['.$this->getArrayLengthMarker(count($arr)).']:';
+        $lines = [$header];
+
+        foreach ($arr as $item) {
+            if ($this->isScalar($item)) {
+                $lines[] = $itemIndent.'- '.$this->encodePrimitive($item);
+            } elseif (is_array($item) && empty($item)) {
+                // Empty structure in list - use bare hyphen (object format)
+                // PHP can't distinguish {} from [] so we default to object format
+                $lines[] = $itemIndent.'-';
+            } elseif (is_array($item) && ! array_is_list($item)) {
+                // Object in list
+                $lines[] = $this->listItemObjectToToon($item, $depth + 1);
+            } elseif (is_array($item) && array_is_list($item) && $this->isArrayOfPrimitives($item)) {
+                // Primitive array in list - inline format with keyless header
+                $values = array_map(fn ($v) => $this->encodePrimitive($v), $item);
+                $lines[] = $itemIndent.'- ['.$this->getArrayLengthMarker(count($item)).']: '.implode($this->delimiter, $values);
+            } elseif (is_array($item) && array_is_list($item)) {
+                // Nested array in list - recurse
+                $lines[] = $this->listItemArray($item, $depth + 1);
+            } else {
+                $lines[] = $itemIndent.'- '.$this->encodePrimitive($item);
+            }
+        }
+
+        return implode("\n", $lines);
+    }
+
+    protected function listItemObjectToToon(array $obj, int $depth): string
+    {
+        $indent = str_repeat(' ', $this->indent * $depth);
+
+        // Empty object is just a bare hyphen
+        if (empty($obj)) {
+            return $indent.'-';
+        }
+
+        $lines = [];
+        $isFirst = true;
+
+        foreach ($obj as $key => $val) {
+            if (isset($this->omitKeysSet[$key])) {
+                continue;
+            }
+
+            if ($this->shouldOmit('null') && $val === null) {
+                continue;
+            }
+
+            if ($this->shouldOmit('empty') && $val === '') {
+                continue;
+            }
+
+            if ($this->shouldOmit('false') && $val === false) {
+                continue;
+            }
+
+            $formattedKey = $this->encodeKey((string) $key);
+            $prefix = $isFirst ? '- ' : '  ';
+
+            if ($this->isScalar($val)) {
+                $lines[] = $indent.$prefix.$formattedKey.': '.$this->encodePrimitive($val);
+            } elseif (is_array($val) && empty($val)) {
+                // Empty nested structure - use object format per TOON spec
+                $lines[] = $indent.$prefix.$formattedKey.':';
+            } elseif (is_array($val) && array_is_list($val) && $this->isArrayOfPrimitives($val)) {
+                $values = array_map(fn ($v) => $this->encodePrimitive($v), $val);
+                $lines[] = $indent.$prefix.$formattedKey.'['.$this->getArrayLengthMarker(count($val)).']: '.implode($this->delimiter, $values);
+            } elseif (is_array($val) && array_is_list($val) && $this->isArrayOfUniformPrimitiveObjects($val)) {
+                // Tabular array within list item (only for objects with primitive values)
+                $lines[] = $this->listItemTabularArray($val, $depth, $formattedKey, $isFirst);
+            } elseif (is_array($val) && array_is_list($val)) {
+                // Nested list array within list item
+                $lines[] = $this->listItemNestedArray($val, $depth, $formattedKey, $isFirst);
+            } else {
+                // Nested object - content needs extra indent since field line has prefix
+                $lines[] = $indent.$prefix.$formattedKey.':';
+                $lines[] = $this->valueToToon($val, $depth + 2);
+            }
+
+            $isFirst = false;
+        }
+
+        return implode("\n", $lines);
+    }
+
+    protected function listItemTabularArray(array $arr, int $depth, string $formattedKey, bool $isFirst): string
+    {
+        $fieldIndent = str_repeat(' ', $this->indent * $depth);
+        // Row indent is depth + 2 to account for the "- " prefix on header line
+        $rowIndent = str_repeat(' ', $this->indent * ($depth + 2));
+        $prefix = $isFirst ? '- ' : '  ';
+
+        $fields = array_keys((array) $arr[0]);
+        $formattedFields = array_map(fn ($f) => $this->encodeKey((string) $f), $fields);
+        $header = $fieldIndent.$prefix.$formattedKey.'['.$this->getArrayLengthMarker(count($arr)).']{'.implode($this->delimiter, $formattedFields).'}:';
+
+        $rows = [];
+        foreach ($arr as $item) {
+            $cells = array_map(fn ($f) => $this->encodeTableValue($item[$f] ?? null), $fields);
+            $rows[] = $rowIndent.implode($this->delimiter, $cells);
+        }
+
+        return $header."\n".implode("\n", $rows);
+    }
+
+    protected function listItemArray(array $arr, int $depth): string
+    {
+        $itemIndent = str_repeat(' ', $this->indent * $depth);
+
+        if (empty($arr)) {
+            return $itemIndent.'- [0]:';
+        }
+
+        if ($this->isArrayOfPrimitives($arr)) {
+            $values = array_map(fn ($v) => $this->encodePrimitive($v), $arr);
+
+            return $itemIndent.'- ['.$this->getArrayLengthMarker(count($arr)).']: '.implode($this->delimiter, $values);
+        }
+
+        // Non-primitive array - use list format
+        $header = $itemIndent.'- ['.$this->getArrayLengthMarker(count($arr)).']:';
+        $lines = [$header];
+        $contentIndent = str_repeat(' ', $this->indent * ($depth + 2));
+
+        foreach ($arr as $item) {
+            if ($this->isScalar($item)) {
+                $lines[] = $contentIndent.'- '.$this->encodePrimitive($item);
+            } elseif (is_array($item) && empty($item)) {
+                $lines[] = $contentIndent.'-';
+            } elseif (is_array($item) && array_is_list($item) && $this->isArrayOfPrimitives($item)) {
+                $values = array_map(fn ($v) => $this->encodePrimitive($v), $item);
+                $lines[] = $contentIndent.'- ['.$this->getArrayLengthMarker(count($item)).']: '.implode($this->delimiter, $values);
+            } elseif (is_array($item) && ! array_is_list($item)) {
+                $lines[] = $this->listItemObjectToToon($item, $depth + 2);
+            } else {
+                $lines[] = $this->listItemArray($item, $depth + 2);
+            }
+        }
+
+        return implode("\n", $lines);
+    }
+
+    protected function listItemNestedArray(array $arr, int $depth, string $formattedKey, bool $isFirst): string
+    {
+        $fieldIndent = str_repeat(' ', $this->indent * $depth);
+        // Content indent is depth + 2 to account for "- " prefix on header
+        $contentIndent = str_repeat(' ', $this->indent * ($depth + 2));
+        $prefix = $isFirst ? '- ' : '  ';
+
+        $header = $fieldIndent.$prefix.$formattedKey.'['.$this->getArrayLengthMarker(count($arr)).']:';
+        $lines = [$header];
+
+        foreach ($arr as $item) {
+            if ($this->isScalar($item)) {
+                $lines[] = $contentIndent.'- '.$this->encodePrimitive($item);
+            } elseif (is_array($item) && array_is_list($item) && $this->isArrayOfPrimitives($item)) {
+                // Inner array of primitives - inline format
+                $values = array_map(fn ($v) => $this->encodePrimitive($v), $item);
+                $lines[] = $contentIndent.'- ['.$this->getArrayLengthMarker(count($item)).']: '.implode($this->delimiter, $values);
+            } elseif (is_array($item) && ! array_is_list($item)) {
+                // Inner object
+                $objContent = $this->listItemObjectToToon($item, $depth + 2);
+                $lines[] = $objContent;
+            } else {
+                // Other nested arrays - recurse
+                $lines[] = $contentIndent.'- '.$this->valueToToon($item, $depth + 3, null);
+            }
+        }
+
+        return implode("\n", $lines);
+    }
+
     protected function associativeArrayToToon(array $arr, int $depth): string
     {
         $indentStr = str_repeat(' ', $this->indent * $depth);
@@ -212,6 +395,13 @@ class ToonEncoder
         foreach ($arr as $key => $val) {
             if (isset($this->omitKeysSet[$key])) {
                 continue;
+            }
+
+            // Convert Collections/Arrayables to array before type checks
+            if ($val instanceof \Illuminate\Contracts\Support\Arrayable) {
+                $val = $val->toArray();
+            } elseif ($val instanceof \Traversable && ! $val instanceof \DateTimeInterface) {
+                $val = iterator_to_array($val);
             }
 
             if ($this->shouldOmit('null') && $val === null) {
@@ -231,14 +421,18 @@ class ToonEncoder
             if ($this->isScalar($val)) {
                 $lines[] = $indentStr.$formattedKey.': '.$this->encodePrimitive($val);
             } elseif (is_array($val) && empty($val)) {
+                // Empty nested structure - use object format (key:) per TOON spec
+                // PHP can't distinguish {} from [] so we default to object format
                 $lines[] = $indentStr.$formattedKey.':';
             } elseif (is_array($val) && array_is_list($val) && $this->isArrayOfPrimitives($val)) {
                 $lines[] = $this->inlinePrimitiveArrayToToon($val, $depth, (string) $key);
             } elseif (is_array($val) && array_is_list($val) && $this->flattener->hasNestedObjects($val)) {
                 $flattened = $this->flattener->flatten($val);
                 $lines[] = $this->flattenedToToon($flattened, $depth, (string) $key);
-            } elseif (is_array($val) && array_is_list($val) && $this->isArrayOfUniformObjects($val)) {
+            } elseif (is_array($val) && array_is_list($val) && $this->isArrayOfUniformPrimitiveObjects($val)) {
                 $lines[] = $this->arrayOfObjectsToToon($val, $depth, (string) $key);
+            } elseif (is_array($val) && array_is_list($val) && $this->needsListFormat($val)) {
+                $lines[] = $this->listFormatArrayToToon($val, $depth, (string) $key);
             } else {
                 $lines[] = $indentStr.$formattedKey.':';
                 $lines[] = $this->valueToToon($val, $depth + 1);
@@ -283,10 +477,6 @@ class ToonEncoder
 
     protected function encodeTableValue(mixed $v): string
     {
-        if ($v === null) {
-            return '';
-        }
-
         return $this->encodePrimitive($v);
     }
 
@@ -461,7 +651,7 @@ class ToonEncoder
         return $s !== '' && (str_starts_with($s, '{') || str_starts_with($s, '['));
     }
 
-    protected function isArrayOfUniformObjects(array $arr): bool
+    protected function isArrayOfUniformPrimitiveObjects(array $arr): bool
     {
         if (count($arr) < $this->minRowsForTable) {
             return false;
@@ -470,19 +660,44 @@ class ToonEncoder
         $firstKeys = null;
 
         foreach ($arr as $item) {
-            if (! is_array($item)) {
+            // Must be an associative array (object), not a list array
+            // Note: empty arrays return true from array_is_list, so they're excluded here
+            if (! is_array($item) || array_is_list($item)) {
                 return false;
             }
 
             $keys = array_keys($item);
+            sort($keys); // Sort to compare regardless of order
 
             if ($firstKeys === null) {
                 $firstKeys = $keys;
             } elseif ($keys !== $firstKeys) {
                 return false;
             }
+
+            // All values must be scalars
+            foreach ($item as $val) {
+                if (! $this->isScalar($val)) {
+                    return false;
+                }
+            }
         }
 
         return true;
+    }
+
+    protected function needsListFormat(array $arr): bool
+    {
+        if (empty($arr)) {
+            return false;
+        }
+
+        foreach ($arr as $item) {
+            if (is_array($item)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 }

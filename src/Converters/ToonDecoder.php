@@ -18,6 +18,12 @@ class ToonDecoder
 
     protected string $delimiter;
 
+    protected array $lines;
+
+    protected int $lineCount;
+
+    protected int $pos;
+
     public function __construct(?ArrayUnflattener $unflattener = null, ?array $config = null)
     {
         $config ??= Config::get('toon', []);
@@ -28,21 +34,50 @@ class ToonDecoder
         $this->delimiter = (string) ($config['delimiter'] ?? ',');
     }
 
-    public function decode(string $toon): array
+    public function decode(string $toon): mixed
     {
-        $lines = explode("\n", $toon);
-        $lineCount = count($lines);
-        $result = [];
-        $stack = [&$result];
-        $indentStack = [-1];
-        $hasRootContent = false;
+        $this->lines = explode("\n", $toon);
+        $this->lineCount = count($this->lines);
+        $this->pos = 0;
 
-        $i = 0;
-        while ($i < $lineCount) {
-            $line = $lines[$i];
+        // Empty input returns empty object
+        $hasContent = false;
+        foreach ($this->lines as $line) {
+            if (trim($line) !== '') {
+                $hasContent = true;
+                break;
+            }
+        }
+
+        if (! $hasContent) {
+            return [];
+        }
+
+        $result = $this->parseBlock(-1);
+
+        // If the result is an array with sequential numeric keys and contains
+        // only one element that is NOT an associative array, return that element
+        // This handles single primitive values at root level
+        if (array_is_list($result) && count($result) === 1) {
+            $first = $result[0];
+            // Only unwrap if it's a primitive (not an array/object)
+            if (! is_array($first)) {
+                return $first;
+            }
+        }
+
+        return $result;
+    }
+
+    protected function parseBlock(int $minIndent): array
+    {
+        $result = [];
+
+        while ($this->pos < $this->lineCount) {
+            $line = $this->lines[$this->pos];
 
             if (trim($line) === '') {
-                $i++;
+                $this->pos++;
 
                 continue;
             }
@@ -50,11 +85,21 @@ class ToonDecoder
             $indent = strlen($line) - strlen(ltrim($line));
             $content = trim($line);
 
-            while (count($indentStack) > 1 && $indent <= end($indentStack)) {
-                array_pop($stack);
-                array_pop($indentStack);
+            if ($indent <= $minIndent && $minIndent >= 0) {
+                break;
             }
 
+            // Check for list item
+            if (str_starts_with($content, '- ') || $content === '-') {
+                $itemContent = $content === '-' ? '' : substr($content, 2);
+                $this->pos++;
+                $item = $this->parseListItem($itemContent, $indent);
+                $result[] = $item;
+
+                continue;
+            }
+
+            // Check for array header
             $arrayMatch = $this->parseArrayHeader($content);
             if ($arrayMatch !== null) {
                 $keyName = $arrayMatch['key'];
@@ -63,93 +108,313 @@ class ToonDecoder
                 $activeDelimiter = $arrayMatch['delimiter'];
                 $inlineValues = $arrayMatch['inline'];
 
-                $isRootLevel = count($stack) === 1 && ! $hasRootContent;
-                $isGenericKey = $keyName === 'items' || $keyName === null;
-                $useKeyName = $keyName !== null && (! $isRootLevel || ! $isGenericKey);
-                $hasRootContent = true;
+                $this->pos++;
 
-                if ($inlineValues !== '' && $columns === []) {
+                if ($rowCount === 0) {
+                    // Empty array
+                    $items = [];
+                } elseif ($inlineValues !== '' && $columns === []) {
+                    // Inline primitive array: key[N]: a,b,c
                     $items = $this->parseRow($inlineValues, $rowCount, $activeDelimiter);
-
-                    $current = &$stack[count($stack) - 1];
-
-                    if ($useKeyName) {
-                        $current[$keyName] = $items;
-                    } else {
-                        foreach ($items as $item) {
-                            $current[] = $item;
-                        }
-                    }
+                } elseif ($columns !== []) {
+                    // Tabular array with columns
+                    $items = $this->parseTabularRows($rowCount, $columns, $activeDelimiter, $indent);
                 } else {
-                    $rows = [];
+                    // List format array or simple rows
+                    $items = $this->parseListOrRows($rowCount, $indent, $activeDelimiter);
+                }
 
-                    for ($j = 0; $j < $rowCount && ($i + 1 + $j) < $lineCount; $j++) {
-                        $rowLine = $lines[$i + 1 + $j];
-                        $rowContent = trim($rowLine);
-
-                        if ($rowContent === '') {
-                            if ($this->strict) {
-                                throw ToonException::blankLineInArrayBlock();
-                            }
-
-                            continue;
-                        }
-
-                        $cells = $this->parseRow($rowContent, count($columns), $activeDelimiter);
-
-                        if ($this->strict && count($columns) > 0 && count($cells) !== count($columns)) {
-                            throw ToonException::rowWidthMismatch(count($columns), count($cells));
-                        }
-
-                        $rows[] = $cells;
-                    }
-
-                    $i += $rowCount;
-
-                    if ($this->strict && count($rows) !== $rowCount) {
-                        throw ToonException::arrayLengthMismatch($rowCount, count($rows));
-                    }
-
-                    $items = empty($columns)
-                        ? $rows
-                        : ($this->hasNestedColumns($columns)
-                            ? $this->unflattener->unflatten($rows, $columns)
-                            : $this->rowsToObjects($rows, $columns));
-
-                    $current = &$stack[count($stack) - 1];
-
-                    if ($useKeyName) {
-                        $current[$keyName] = $items;
-                    } else {
-                        foreach ($items as $item) {
-                            $current[] = $item;
-                        }
+                if ($keyName !== null) {
+                    $result[$keyName] = $items;
+                } else {
+                    foreach ($items as $item) {
+                        $result[] = $item;
                     }
                 }
-            } elseif (str_ends_with($content, ':') && ! $this->containsKeyValueSeparator($content)) {
-                $key = $this->parseKey(rtrim($content, ':'));
-                $current = &$stack[count($stack) - 1];
-                $current[$key] = [];
-                $stack[] = &$current[$key];
-                $indentStack[] = $indent;
-            } elseif ($this->containsKeyValueSeparator($content)) {
-                [$key, $value] = $this->splitKeyValue($content);
-                $current = &$stack[count($stack) - 1];
-                $current[$this->parseKey($key)] = $this->parseValue($value);
-            } else {
-                $current = &$stack[count($stack) - 1];
-                $current[] = $this->parseValue($content);
+
+                continue;
             }
 
-            $i++;
+            // Check for nested object (key:)
+            if (str_ends_with($content, ':') && ! $this->containsKeyValueSeparator($content)) {
+                $key = $this->parseKey(rtrim($content, ':'));
+                $this->pos++;
+                $result[$key] = $this->parseBlock($indent);
+
+                continue;
+            }
+
+            // Check for key-value pair
+            if ($this->containsKeyValueSeparator($content)) {
+                [$key, $value] = $this->splitKeyValue($content);
+                $result[$this->parseKey($key)] = $this->parseValue($value);
+                $this->pos++;
+
+                continue;
+            }
+
+            // Plain value
+            $result[] = $this->parseValue($content);
+            $this->pos++;
         }
 
         return $result;
     }
 
+    protected function parseListItem(string $content, int $listIndent): mixed
+    {
+        // Empty list item becomes empty object
+        if ($content === '') {
+            return [];
+        }
+
+        // Check if it's an inline array: [N]: values or [N]{cols}: values
+        $arrayMatch = $this->parseArrayHeader($content);
+        if ($arrayMatch !== null) {
+            $rowCount = $arrayMatch['count'];
+            $columns = $arrayMatch['columns'];
+            $activeDelimiter = $arrayMatch['delimiter'];
+            $inlineValues = $arrayMatch['inline'];
+            $keyName = $arrayMatch['key'];
+
+            if ($rowCount === 0) {
+                $items = [];
+            } elseif ($inlineValues !== '' && $columns === []) {
+                $items = $this->parseRow($inlineValues, $rowCount, $activeDelimiter);
+            } elseif ($columns !== []) {
+                $items = $this->parseTabularRows($rowCount, $columns, $activeDelimiter, $listIndent + 2);
+            } else {
+                $items = $this->parseListOrRows($rowCount, $listIndent + 2, $activeDelimiter);
+            }
+
+            if ($keyName !== null) {
+                // It's an object with an array field, parse more fields
+                $obj = [$keyName => $items];
+                $this->parseObjectFields($obj, $listIndent);
+
+                return $obj;
+            }
+
+            return $items;
+        }
+
+        // Check if it's a key-value pair (start of an object)
+        if ($this->containsKeyValueSeparator($content)) {
+            [$key, $value] = $this->splitKeyValue($content);
+            $obj = [$this->parseKey($key) => $this->parseValue($value)];
+            $this->parseObjectFields($obj, $listIndent);
+
+            return $obj;
+        }
+
+        // Check for nested object key (key:) - containsKeyValueSeparator already returned above
+        if (str_ends_with($content, ':')) {
+            $key = $this->parseKey(rtrim($content, ':'));
+            $obj = [$key => $this->parseBlock($listIndent + 2)];
+            $this->parseObjectFields($obj, $listIndent);
+
+            return $obj;
+        }
+
+        // It's a primitive value
+        return $this->parseValue($content);
+    }
+
+    protected function parseObjectFields(array &$obj, int $listIndent): void
+    {
+        while ($this->pos < $this->lineCount) {
+            $line = $this->lines[$this->pos];
+
+            if (trim($line) === '') {
+                $this->pos++;
+
+                continue;
+            }
+
+            $indent = strlen($line) - strlen(ltrim($line));
+            $content = trim($line);
+
+            // Stop if we've dedented or hit another list item
+            if ($indent <= $listIndent || str_starts_with($content, '- ') || $content === '-') {
+                break;
+            }
+
+            // Check for array header within object
+            $arrayMatch = $this->parseArrayHeader($content);
+            if ($arrayMatch !== null) {
+                $keyName = $arrayMatch['key'];
+                $rowCount = $arrayMatch['count'];
+                $columns = $arrayMatch['columns'];
+                $activeDelimiter = $arrayMatch['delimiter'];
+                $inlineValues = $arrayMatch['inline'];
+
+                $this->pos++;
+
+                if ($rowCount === 0) {
+                    $items = [];
+                } elseif ($inlineValues !== '' && $columns === []) {
+                    $items = $this->parseRow($inlineValues, $rowCount, $activeDelimiter);
+                } elseif ($columns !== []) {
+                    $items = $this->parseTabularRows($rowCount, $columns, $activeDelimiter, $indent);
+                } else {
+                    $items = $this->parseListOrRows($rowCount, $indent, $activeDelimiter);
+                }
+
+                if ($keyName !== null) {
+                    $obj[$keyName] = $items;
+                }
+
+                continue;
+            }
+
+            // Check for nested object (key:)
+            if (str_ends_with($content, ':') && ! $this->containsKeyValueSeparator($content)) {
+                $key = $this->parseKey(rtrim($content, ':'));
+                $this->pos++;
+                $obj[$key] = $this->parseBlock($indent);
+
+                continue;
+            }
+
+            // Key-value pair
+            if ($this->containsKeyValueSeparator($content)) {
+                [$key, $value] = $this->splitKeyValue($content);
+                $obj[$this->parseKey($key)] = $this->parseValue($value);
+                $this->pos++;
+
+                continue;
+            }
+
+            break;
+        }
+    }
+
+    protected function parseTabularRows(int $rowCount, array $columns, string $delimiter, int $baseIndent): array
+    {
+        $rows = [];
+
+        for ($j = 0; $j < $rowCount && $this->pos < $this->lineCount; $j++) {
+            $rowLine = $this->lines[$this->pos];
+            $rowContent = trim($rowLine);
+
+            if ($rowContent === '') {
+                if ($this->strict) {
+                    throw ToonException::blankLineInArrayBlock();
+                }
+                $this->pos++;
+                $j--;
+
+                continue;
+            }
+
+            $cells = $this->parseRow($rowContent, count($columns), $delimiter);
+
+            if ($this->strict && count($cells) !== count($columns)) {
+                throw ToonException::rowWidthMismatch(count($columns), count($cells));
+            }
+
+            $rows[] = $cells;
+            $this->pos++;
+        }
+
+        if ($this->strict && count($rows) !== $rowCount) {
+            throw ToonException::arrayLengthMismatch($rowCount, count($rows));
+        }
+
+        return $this->hasNestedColumns($columns)
+            ? $this->unflattener->unflatten($rows, $columns)
+            : $this->rowsToObjects($rows, $columns);
+    }
+
+    protected function parseListOrRows(int $rowCount, int $baseIndent, string $delimiter): array
+    {
+        // Peek to see if this is list format
+        if ($this->pos < $this->lineCount) {
+            $peekLine = $this->lines[$this->pos];
+            $peekContent = trim($peekLine);
+
+            if (str_starts_with($peekContent, '- ') || $peekContent === '-') {
+                // List format
+                return $this->parseListItems($rowCount, $baseIndent);
+            }
+        }
+
+        // Simple rows (arrays of single values)
+        $rows = [];
+        for ($j = 0; $j < $rowCount && $this->pos < $this->lineCount; $j++) {
+            $rowLine = $this->lines[$this->pos];
+            $rowContent = trim($rowLine);
+
+            if ($rowContent === '') {
+                if ($this->strict) {
+                    throw ToonException::blankLineInArrayBlock();
+                }
+                $this->pos++;
+                $j--;
+
+                continue;
+            }
+
+            $rows[] = $this->parseRow($rowContent, -1, $delimiter);
+            $this->pos++;
+        }
+
+        // If each row has exactly one cell, flatten
+        $allSingle = true;
+        foreach ($rows as $row) {
+            if (count($row) !== 1) {
+                $allSingle = false;
+                break;
+            }
+        }
+
+        if ($allSingle) {
+            return array_map(fn ($r) => $r[0], $rows);
+        }
+
+        return $rows;
+    }
+
+    protected function parseListItems(int $expectedCount, int $baseIndent): array
+    {
+        $items = [];
+
+        while ($this->pos < $this->lineCount && count($items) < $expectedCount) {
+            $line = $this->lines[$this->pos];
+
+            if (trim($line) === '') {
+                $this->pos++;
+
+                continue;
+            }
+
+            $indent = strlen($line) - strlen(ltrim($line));
+            $content = trim($line);
+
+            // List items should be at baseIndent or deeper
+            if ($indent < $baseIndent && $baseIndent >= 0) {
+                break;
+            }
+
+            if (str_starts_with($content, '- ') || $content === '-') {
+                $itemContent = $content === '-' ? '' : substr($content, 2);
+                $this->pos++;
+                $items[] = $this->parseListItem($itemContent, $indent);
+            } else {
+                break;
+            }
+        }
+
+        if ($this->strict && count($items) !== $expectedCount) {
+            throw ToonException::arrayLengthMismatch($expectedCount, count($items));
+        }
+
+        return $items;
+    }
+
     protected function parseArrayHeader(string $content): ?array
     {
-        if (! preg_match('/^([a-zA-Z_][a-zA-Z0-9_.]*|\".+\")?\[(\d+)(\\\\t|\|)?\](?:\{([^\}]*)\})?:\s*(.*)$/', $content, $m)) {
+        if (! preg_match('/^([a-zA-Z_][a-zA-Z0-9_.]*|\".+\")?\[(\d+)([\t|])?\](?:\{([^\}]*)\})?:\s*(.*)$/', $content, $m)) {
             return null;
         }
 
@@ -160,7 +425,7 @@ class ToonDecoder
         $inlineValues = $m[5];
 
         $delimiter = match ($delimiterMarker) {
-            '\t' => "\t",
+            "\t" => "\t",
             '|' => '|',
             default => ',',
         };
@@ -269,7 +534,8 @@ class ToonDecoder
             $char = $row[$i];
 
             if ($escape) {
-                $current .= $char;
+                // Preserve the backslash for parseValue to handle escape sequences
+                $current .= '\\'.$char;
                 $escape = false;
 
                 continue;
@@ -347,7 +613,12 @@ class ToonDecoder
         }
 
         if ($this->isNumeric($value)) {
-            return str_contains($value, '.') ? (float) $value : (int) $value;
+            // Numbers with decimal points or exponents should be floats
+            if (str_contains($value, '.') || stripos($value, 'e') !== false) {
+                return (float) $value;
+            }
+
+            return (int) $value;
         }
 
         return $this->unescapeLegacy($value);
