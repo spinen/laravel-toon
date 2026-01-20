@@ -2,6 +2,22 @@
 
 declare(strict_types=1);
 
+function mapSpecOptionsToConfig(array $options): array
+{
+    $mapping = [
+        'flattenDepth' => 'key_folding_depth',
+        'keyFolding' => 'key_folding',
+    ];
+
+    $mapped = [];
+    foreach ($options as $key => $value) {
+        $configKey = $mapping[$key] ?? $key;
+        $mapped[$configKey] = $value;
+    }
+
+    return $mapped;
+}
+
 /**
  * Build a Pest dataset from a Toon spec JSON fixture.
  *
@@ -30,30 +46,34 @@ function toonSpecDataset(string $fixture): array
 
         $decoded = json_decode(
             file_get_contents($file),
-            true,
+            false,
             flags: JSON_THROW_ON_ERROR
         );
 
-        if (! isset($decoded['tests']) || ! is_array($decoded['tests'])) {
+        if (! isset($decoded->tests) || ! is_array($decoded->tests)) {
             throw new Exception("Spec file [{$file}] has no valid tests array");
         }
 
-        // Preserve spec "name" as dataset keys
-        $testsByName = array_column(
-            $decoded['tests'],
-            null,
-            'name'
-        );
+        $result = [];
+        foreach ($decoded->tests as $s) {
+            $name = $s->name;
+            // For encode tests, input needs stdClass preserved to distinguish {} from []
+            // For decode tests, input is a string so no conversion needed
+            // Expected values are compared against output, so convert to arrays for simpler comparison
+            $expected = $s->expected ?? null;
+            if ($expected !== null && ! is_string($expected)) {
+                $expected = json_decode(json_encode($expected), true);
+            }
 
-        return array_map(
-            static fn (array $s) => [
-                'input' => $s['input'],
-                'expected' => $s['expected'] ?? null,
-                'options' => $s['options'] ?? [],
-                'shouldError' => $s['shouldError'] ?? false,
-            ],
-            $testsByName
-        );
+            $result[$name] = [
+                'input' => $s->input,
+                'expected' => $expected,
+                'options' => mapSpecOptionsToConfig((array) ($s->options ?? new \stdClass)),
+                'shouldError' => $s->shouldError ?? false,
+            ];
+        }
+
+        return $result;
     } catch (Throwable $e) {
         // Surface loader errors as a single dataset entry
         return [

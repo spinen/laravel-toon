@@ -33,7 +33,7 @@ it('diff handles empty data', function () {
     $diff = Toon::diff([]);
 
     expect($diff['json_chars'])->toBe(2); // '[]'
-    expect($diff['toon_chars'])->toBe(0); // empty string
+    expect($diff['toon_chars'])->toBe(4); // '[0]:'
 });
 
 it('only filters to specified keys', function () {

@@ -4,6 +4,10 @@ declare(strict_types=1);
 
 use MischaSigtermans\Toon\Facades\Toon;
 
+beforeEach(function () {
+    Toon::clearResolvedInstances();
+});
+
 it(
     'handles key folding with safe mode, depth control, collision avoidance',
     function (

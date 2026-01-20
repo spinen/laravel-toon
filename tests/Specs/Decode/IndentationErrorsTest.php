@@ -4,6 +4,10 @@ declare(strict_types=1);
 
 use MischaSigtermans\Toon\Facades\Toon;
 
+beforeEach(function () {
+    Toon::clearResolvedInstances();
+});
+
 it(
     'handles strict mode indentation validation - non-multiple indentation, tab characters, custom indent sizes',
     function (
@@ -14,14 +18,14 @@ it(
     ) {
         if (! empty($options)) {
             config(['toon' => array_merge(config('toon', []), $options)]);
+            Toon::clearResolvedInstances();
         }
 
-        expect(Toon::decode($input))
-            ->when(
-                $shouldError,
-                fn ($e) => $e->toThrow(\Exception::class)
-            )
-            ->toEqual($expected);
+        if ($shouldError) {
+            expect(fn () => Toon::decode($input))->toThrow(\Exception::class);
+        } else {
+            expect(Toon::decode($input))->toEqual($expected);
+        }
     }
 )
     ->with(toonSpecDataset('decode/indentation-errors'))

@@ -11,6 +11,8 @@ use MischaSigtermans\Toon\Support\ArrayFlattener;
 
 class ToonEncoder
 {
+    private const EMPTY_OBJECT_MARKER = '__toon_empty_object__';
+
     protected ArrayFlattener $flattener;
 
     protected int $minRowsForTable;
@@ -33,6 +35,12 @@ class ToonEncoder
 
     protected bool $omitAll;
 
+    protected string $keyFolding;
+
+    protected int $flattenDepth;
+
+    protected array $topLevelKeys = [];
+
     public function __construct(?ArrayFlattener $flattener = null, ?array $config = null)
     {
         $config ??= Config::get('toon', []);
@@ -41,7 +49,7 @@ class ToonEncoder
             trigger_error('The "escape_style" config option is deprecated and has been removed in v1.0. Strings are now quoted per TOON v3.0 spec.', E_USER_DEPRECATED);
         }
 
-        $maxDepth = (int) ($config['max_flatten_depth'] ?? 3);
+        $maxDepth = (int) ($config['max_flatten_depth'] ?? PHP_INT_MAX);
         $this->flattener = $flattener ?? new ArrayFlattener($maxDepth);
         $this->minRowsForTable = (int) ($config['min_rows_for_table'] ?? 2);
         $this->indent = (int) ($config['indent'] ?? 2);
@@ -58,6 +66,12 @@ class ToonEncoder
         $this->dateFormat = $config['date_format'] ?? null;
         $this->truncateStrings = $config['truncate_strings'] ?? null;
         $this->numberPrecision = $config['number_precision'] ?? null;
+
+        $this->keyFolding = (string) ($config['key_folding'] ?? 'off');
+        // Key folding depth - uses its own config key, defaults to infinity
+        $this->flattenDepth = isset($config['key_folding_depth'])
+            ? (int) $config['key_folding_depth']
+            : PHP_INT_MAX;
     }
 
     protected function shouldOmit(string $type): bool
@@ -70,15 +84,28 @@ class ToonEncoder
         if (is_string($input) && $this->looksLikeJson($input)) {
             $decoded = json_decode($input, true);
             if (json_last_error() === JSON_ERROR_NONE && is_array($decoded)) {
-                return $this->valueToToon($decoded);
+                $input = $decoded;
             }
         }
 
-        if (is_object($input)) {
-            $input = json_decode(json_encode($input), true);
+        // Convert all objects to arrays, preserving empty object markers
+        if (is_object($input) || is_array($input)) {
+            $input = $this->convertObjectsToArrays($input);
         }
 
         if (is_array($input)) {
+            // Root-level empty object (from JSON "{}") → empty string
+            if ($this->isEmptyObjectMarker($input)) {
+                return '';
+            }
+
+            // Store top-level keys for collision detection during folding
+            if (! array_is_list($input)) {
+                $this->topLevelKeys = array_map('strval', array_keys($input));
+            } else {
+                $this->topLevelKeys = [];
+            }
+
             return $this->valueToToon($input);
         }
 
@@ -96,23 +123,33 @@ class ToonEncoder
         }
 
         if (is_array($value)) {
+            // Check for empty object marker
+            if ($this->isEmptyObjectMarker($value)) {
+                return '';
+            }
+
             if (empty($value)) {
+                // Root-level empty array outputs [0]:
+                if ($depth === 0 && $parentKey === null) {
+                    return '[0]:';
+                }
+
                 return '';
             }
 
             if (array_is_list($value)) {
-                if ($this->flattener->hasNestedObjects($value)) {
-                    $flattened = $this->flattener->flatten($value);
-
-                    return $this->flattenedToToon($flattened, $depth, $parentKey);
+                if ($this->isArrayOfPrimitives($value)) {
+                    return $this->inlinePrimitiveArrayToToon($value, $depth, $parentKey);
                 }
 
                 if ($this->isArrayOfUniformPrimitiveObjects($value)) {
                     return $this->arrayOfObjectsToToon($value, $depth, $parentKey);
                 }
 
-                if ($this->isArrayOfPrimitives($value)) {
-                    return $this->inlinePrimitiveArrayToToon($value, $depth, $parentKey);
+                if ($this->isArrayOfUniformObjects($value) && $this->flattener->hasNestedObjects($value)) {
+                    $flattened = $this->flattener->flatten($value);
+
+                    return $this->flattenedToToon($flattened, $depth, $parentKey);
                 }
 
                 if ($this->needsListFormat($value)) {
@@ -218,12 +255,14 @@ class ToonEncoder
         $lines = [$header];
 
         foreach ($arr as $item) {
-            if ($this->isScalar($item)) {
+            if ($this->isEmptyObjectMarker($item)) {
+                // Empty object → just dash
+                $lines[] = $itemIndent.'-';
+            } elseif ($this->isScalar($item)) {
                 $lines[] = $itemIndent.'- '.$this->encodePrimitive($item);
             } elseif (is_array($item) && empty($item)) {
-                // Empty structure in list - use bare hyphen (object format)
-                // PHP can't distinguish {} from [] so we default to object format
-                $lines[] = $itemIndent.'-';
+                // Empty array in list uses [0]: format
+                $lines[] = $itemIndent.'- [0]:';
             } elseif (is_array($item) && ! array_is_list($item)) {
                 // Object in list
                 $lines[] = $this->listItemObjectToToon($item, $depth + 1);
@@ -246,9 +285,9 @@ class ToonEncoder
     {
         $indent = str_repeat(' ', $this->indent * $depth);
 
-        // Empty object is just a bare hyphen
+        // Empty array uses [0]: format (PHP can't distinguish {} from [])
         if (empty($obj)) {
-            return $indent.'-';
+            return $indent.'- [0]:';
         }
 
         $lines = [];
@@ -277,8 +316,8 @@ class ToonEncoder
             if ($this->isScalar($val)) {
                 $lines[] = $indent.$prefix.$formattedKey.': '.$this->encodePrimitive($val);
             } elseif (is_array($val) && empty($val)) {
-                // Empty nested structure - use object format per TOON spec
-                $lines[] = $indent.$prefix.$formattedKey.':';
+                // Empty array format
+                $lines[] = $indent.$prefix.$formattedKey.'[0]:';
             } elseif (is_array($val) && array_is_list($val) && $this->isArrayOfPrimitives($val)) {
                 $values = array_map(fn ($v) => $this->encodePrimitive($v), $val);
                 $lines[] = $indent.$prefix.$formattedKey.'['.$this->getArrayLengthMarker(count($val)).']: '.implode($this->delimiter, $values);
@@ -337,20 +376,20 @@ class ToonEncoder
         // Non-primitive array - use list format
         $header = $itemIndent.'- ['.$this->getArrayLengthMarker(count($arr)).']:';
         $lines = [$header];
-        $contentIndent = str_repeat(' ', $this->indent * ($depth + 2));
+        $contentIndent = str_repeat(' ', $this->indent * ($depth + 1));
 
         foreach ($arr as $item) {
             if ($this->isScalar($item)) {
                 $lines[] = $contentIndent.'- '.$this->encodePrimitive($item);
             } elseif (is_array($item) && empty($item)) {
-                $lines[] = $contentIndent.'-';
+                $lines[] = $contentIndent.'- [0]:';
             } elseif (is_array($item) && array_is_list($item) && $this->isArrayOfPrimitives($item)) {
                 $values = array_map(fn ($v) => $this->encodePrimitive($v), $item);
                 $lines[] = $contentIndent.'- ['.$this->getArrayLengthMarker(count($item)).']: '.implode($this->delimiter, $values);
             } elseif (is_array($item) && ! array_is_list($item)) {
-                $lines[] = $this->listItemObjectToToon($item, $depth + 2);
+                $lines[] = $this->listItemObjectToToon($item, $depth + 1);
             } else {
-                $lines[] = $this->listItemArray($item, $depth + 2);
+                $lines[] = $this->listItemArray($item, $depth + 1);
             }
         }
 
@@ -392,6 +431,9 @@ class ToonEncoder
         $indentStr = str_repeat(' ', $this->indent * $depth);
         $lines = [];
 
+        // Collect existing keys for collision detection
+        $existingKeys = array_keys($arr);
+
         foreach ($arr as $key => $val) {
             if (isset($this->omitKeysSet[$key])) {
                 continue;
@@ -416,26 +458,209 @@ class ToonEncoder
                 continue;
             }
 
+            // Try key folding if enabled
+            $collisionDetected = false;
+            if ($this->keyFolding === 'safe' && ! $this->keyNeedsQuoting((string) $key)) {
+                $keyStr = (string) $key;
+                // Check for collision with top-level dot-notation keys
+                $hasCollision = $this->hasKeyCollision($keyStr);
+
+                if (! $hasCollision) {
+                    $folded = $this->tryFoldKey($keyStr, $val, 1);
+                    if ($folded !== null) {
+                        [$foldedKey, $foldedVal] = $folded;
+                        $lines[] = $this->encodeFoldedKeyValue($foldedKey, $foldedVal, $depth);
+
+                        continue;
+                    }
+                } else {
+                    $collisionDetected = true;
+                }
+            }
+
             $formattedKey = $this->encodeKey((string) $key);
 
-            if ($this->isScalar($val)) {
+            if ($this->isEmptyObjectMarker($val)) {
+                // Empty object → key: (no value)
+                $lines[] = $indentStr.$formattedKey.':';
+            } elseif ($this->isScalar($val)) {
                 $lines[] = $indentStr.$formattedKey.': '.$this->encodePrimitive($val);
             } elseif (is_array($val) && empty($val)) {
-                // Empty nested structure - use object format (key:) per TOON spec
-                // PHP can't distinguish {} from [] so we default to object format
-                $lines[] = $indentStr.$formattedKey.':';
+                // Empty array format
+                $lines[] = $indentStr.$formattedKey.'[0]:';
             } elseif (is_array($val) && array_is_list($val) && $this->isArrayOfPrimitives($val)) {
                 $lines[] = $this->inlinePrimitiveArrayToToon($val, $depth, (string) $key);
-            } elseif (is_array($val) && array_is_list($val) && $this->flattener->hasNestedObjects($val)) {
+            } elseif (is_array($val) && array_is_list($val) && $this->isArrayOfUniformObjects($val) && $this->flattener->hasNestedObjects($val)) {
                 $flattened = $this->flattener->flatten($val);
                 $lines[] = $this->flattenedToToon($flattened, $depth, (string) $key);
             } elseif (is_array($val) && array_is_list($val) && $this->isArrayOfUniformPrimitiveObjects($val)) {
                 $lines[] = $this->arrayOfObjectsToToon($val, $depth, (string) $key);
             } elseif (is_array($val) && array_is_list($val) && $this->needsListFormat($val)) {
                 $lines[] = $this->listFormatArrayToToon($val, $depth, (string) $key);
+            } elseif (is_array($val) && ! array_is_list($val) && $collisionDetected) {
+                // When collision detected, use non-folding for nested content
+                $lines[] = $indentStr.$formattedKey.':';
+                $lines[] = $this->associativeArrayToToonNoFolding($val, $depth + 1);
             } else {
                 $lines[] = $indentStr.$formattedKey.':';
                 $lines[] = $this->valueToToon($val, $depth + 1);
+            }
+        }
+
+        return implode("\n", $lines);
+    }
+
+    protected function hasKeyCollision(string $path): bool
+    {
+        foreach ($this->topLevelKeys as $existingKey) {
+            // Check if any top-level key would collide with this path when folded
+            if ($existingKey !== $path && str_starts_with($existingKey, $path.'.')) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    protected function tryFoldKey(string $prefix, mixed $value, int $segmentCount): ?array
+    {
+        // Check for collision with top-level keys
+        if ($this->hasKeyCollision($prefix)) {
+            return null;
+        }
+
+        // Not a foldable structure (not an associative array or is a list)
+        if (! is_array($value) || (! empty($value) && array_is_list($value))) {
+            return [$prefix, $value];
+        }
+
+        // Empty object marker - treat like empty array, can fold
+        if ($this->isEmptyObjectMarker($value)) {
+            return [$prefix, $value];
+        }
+
+        // Empty array - can fold
+        if (empty($value)) {
+            return [$prefix, $value];
+        }
+
+        // Multi-key object - can't fold further, return current state
+        if (count($value) !== 1) {
+            return [$prefix, $value];
+        }
+
+        // Stop if we've reached the depth limit (need at least 2 segments to fold)
+        if ($segmentCount >= $this->flattenDepth) {
+            return [$prefix, $value];
+        }
+
+        // Single-key object - try to fold
+        $innerKey = (string) array_key_first($value);
+        $innerVal = $value[$innerKey];
+
+        // Check if inner key needs quoting - stop folding here
+        if ($this->keyNeedsQuoting($innerKey)) {
+            return [$prefix, $value];
+        }
+
+        $foldedKey = $prefix.'.'.$innerKey;
+
+        // Check for collision with top-level literal dot-notation keys
+        if (in_array($foldedKey, $this->topLevelKeys, true)) {
+            return null;
+        }
+
+        // Recursively try to fold further
+        return $this->tryFoldKey($foldedKey, $innerVal, $segmentCount + 1);
+    }
+
+    protected function encodeFoldedKeyValue(string $foldedKey, mixed $value, int $depth): string
+    {
+        $indentStr = str_repeat(' ', $this->indent * $depth);
+
+        if ($this->isScalar($value)) {
+            return $indentStr.$foldedKey.': '.$this->encodePrimitive($value);
+        }
+
+        // Empty object marker → just key:
+        if ($this->isEmptyObjectMarker($value)) {
+            return $indentStr.$foldedKey.':';
+        }
+
+        if (is_array($value) && empty($value)) {
+            return $indentStr.$foldedKey.':';
+        }
+
+        if (is_array($value) && array_is_list($value)) {
+            if ($this->isArrayOfPrimitives($value)) {
+                $values = array_map(fn ($v) => $this->encodePrimitive($v), $value);
+
+                return $indentStr.$foldedKey.'['.$this->getArrayLengthMarker(count($value)).']: '.implode($this->delimiter, $values);
+            }
+
+            if ($this->isArrayOfUniformPrimitiveObjects($value)) {
+                return $this->arrayOfObjectsToToon($value, $depth, $foldedKey);
+            }
+
+            if ($this->needsListFormat($value)) {
+                return $this->listFormatArrayToToon($value, $depth, $foldedKey);
+            }
+        }
+
+        // Multi-key object at the end of fold chain - format WITHOUT further folding
+        if (is_array($value) && ! array_is_list($value)) {
+            $result = $indentStr.$foldedKey.':';
+            $result .= "\n".$this->associativeArrayToToonNoFolding($value, $depth + 1);
+
+            return $result;
+        }
+
+        return $indentStr.$foldedKey.': '.$this->encodePrimitive($value);
+    }
+
+    protected function associativeArrayToToonNoFolding(array $arr, int $depth): string
+    {
+        $indentStr = str_repeat(' ', $this->indent * $depth);
+        $lines = [];
+
+        foreach ($arr as $key => $val) {
+            if (isset($this->omitKeysSet[$key])) {
+                continue;
+            }
+
+            if ($val instanceof \Illuminate\Contracts\Support\Arrayable) {
+                $val = $val->toArray();
+            } elseif ($val instanceof \Traversable && ! $val instanceof \DateTimeInterface) {
+                $val = iterator_to_array($val);
+            }
+
+            if ($this->shouldOmit('null') && $val === null) {
+                continue;
+            }
+
+            if ($this->shouldOmit('empty') && $val === '') {
+                continue;
+            }
+
+            if ($this->shouldOmit('false') && $val === false) {
+                continue;
+            }
+
+            $formattedKey = $this->encodeKey((string) $key);
+
+            if ($this->isScalar($val)) {
+                $lines[] = $indentStr.$formattedKey.': '.$this->encodePrimitive($val);
+            } elseif (is_array($val) && empty($val)) {
+                $lines[] = $indentStr.$formattedKey.'[0]:';
+            } elseif (is_array($val) && array_is_list($val) && $this->isArrayOfPrimitives($val)) {
+                $lines[] = $this->inlinePrimitiveArrayToToon($val, $depth, (string) $key);
+            } elseif (is_array($val) && array_is_list($val) && $this->isArrayOfUniformPrimitiveObjects($val)) {
+                $lines[] = $this->arrayOfObjectsToToon($val, $depth, (string) $key);
+            } elseif (is_array($val) && array_is_list($val) && $this->needsListFormat($val)) {
+                $lines[] = $this->listFormatArrayToToon($val, $depth, (string) $key);
+            } else {
+                $lines[] = $indentStr.$formattedKey.':';
+                $lines[] = $this->associativeArrayToToonNoFolding($val, $depth + 1);
             }
         }
 
@@ -555,11 +780,18 @@ class ToonEncoder
             }
         }
 
-        if (preg_match('/[:"\\\\,\[\]{}\x00-\x1f]/', $s)) {
+        // Always quote strings with these structural characters
+        if (preg_match('/[:"\\\\{}\x00-\x1f]/', $s)) {
             return true;
         }
 
-        if ($this->delimiter !== ',' && str_contains($s, $this->delimiter)) {
+        // Square brackets only need quoting at start of value (interferes with array syntax)
+        if (str_starts_with($s, '[')) {
+            return true;
+        }
+
+        // Quote strings containing the current delimiter
+        if (str_contains($s, $this->delimiter)) {
             return true;
         }
 
@@ -620,8 +852,9 @@ class ToonEncoder
 
     protected function getDelimiterKey(): string
     {
+        // Return actual delimiter character for non-comma delimiters
         return match ($this->delimiter) {
-            "\t" => '\t',
+            "\t" => "\t",
             '|' => '|',
             default => '',
         };
@@ -651,31 +884,50 @@ class ToonEncoder
         return $s !== '' && (str_starts_with($s, '{') || str_starts_with($s, '['));
     }
 
-    protected function isArrayOfUniformPrimitiveObjects(array $arr): bool
+    protected function isArrayOfUniformObjects(array $arr): bool
     {
         if (count($arr) < $this->minRowsForTable) {
             return false;
         }
 
         $firstKeys = null;
+        $firstTypes = null;
 
         foreach ($arr as $item) {
-            // Must be an associative array (object), not a list array
-            // Note: empty arrays return true from array_is_list, so they're excluded here
             if (! is_array($item) || array_is_list($item)) {
                 return false;
             }
 
             $keys = array_keys($item);
-            sort($keys); // Sort to compare regardless of order
+            sort($keys);
+
+            // Check value types (scalar vs array) to ensure structural uniformity
+            $types = [];
+            foreach ($keys as $k) {
+                $types[$k] = is_array($item[$k]) ? 'array' : 'scalar';
+            }
 
             if ($firstKeys === null) {
                 $firstKeys = $keys;
+                $firstTypes = $types;
             } elseif ($keys !== $firstKeys) {
                 return false;
+            } elseif ($types !== $firstTypes) {
+                // Same keys but different value types - not uniform
+                return false;
             }
+        }
 
-            // All values must be scalars
+        return true;
+    }
+
+    protected function isArrayOfUniformPrimitiveObjects(array $arr): bool
+    {
+        if (! $this->isArrayOfUniformObjects($arr)) {
+            return false;
+        }
+
+        foreach ($arr as $item) {
             foreach ($item as $val) {
                 if (! $this->isScalar($val)) {
                     return false;
@@ -699,5 +951,39 @@ class ToonEncoder
         }
 
         return false;
+    }
+
+    protected function convertObjectsToArrays(mixed $value): mixed
+    {
+        if ($value instanceof \stdClass) {
+            $arr = (array) $value;
+            if (empty($arr)) {
+                return [self::EMPTY_OBJECT_MARKER => true];
+            }
+
+            return $this->convertObjectsToArrays($arr);
+        }
+
+        if ($value instanceof \Illuminate\Contracts\Support\Arrayable) {
+            return $this->convertObjectsToArrays($value->toArray());
+        }
+
+        if ($value instanceof \Traversable) {
+            return $this->convertObjectsToArrays(iterator_to_array($value));
+        }
+
+        if (is_array($value)) {
+            return array_map(fn ($v) => $this->convertObjectsToArrays($v), $value);
+        }
+
+        return $value;
+    }
+
+    protected function isEmptyObjectMarker(mixed $value): bool
+    {
+        return is_array($value)
+            && count($value) === 1
+            && isset($value[self::EMPTY_OBJECT_MARKER])
+            && $value[self::EMPTY_OBJECT_MARKER] === true;
     }
 }
