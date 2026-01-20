@@ -7,6 +7,7 @@ function mapSpecOptionsToConfig(array $options): array
     $mapping = [
         'flattenDepth' => 'key_folding_depth',
         'keyFolding' => 'key_folding',
+        'expandPaths' => 'expand_paths',
     ];
 
     $mapped = [];

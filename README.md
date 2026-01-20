@@ -3,9 +3,9 @@
 [![Latest Version on Packagist](https://img.shields.io/packagist/v/mischasigtermans/laravel-toon.svg?style=flat-square)](https://packagist.org/packages/mischasigtermans/laravel-toon)
 [![Total Downloads](https://img.shields.io/packagist/dt/mischasigtermans/laravel-toon.svg?style=flat-square)](https://packagist.org/packages/mischasigtermans/laravel-toon)
 
-A spec-compliant TOON (Token-Optimized Object Notation) encoder/decoder for Laravel with intelligent nested object handling.
+The most complete [TOON](https://toonformat.dev/) implementation for Laravel, and the only one with full [TOON v3.0 specification](https://github.com/toon-format/spec/blob/main/SPEC.md) compliance.
 
-TOON is a compact, YAML-like format designed to reduce token usage when sending data to LLMs. This package implements the [TOON v3.0 specification](https://github.com/toon-format/spec/blob/main/SPEC.md) and achieves **40-60% token reduction** compared to JSON while maintaining full round-trip fidelity.
+TOON (Token-Optimized Object Notation) is a compact, YAML-like format designed to reduce token usage when sending data to LLMs. This package achieves **~50% token reduction** compared to JSON while maintaining full round-trip fidelity, backed by 470 tests.
 
 ## Installation
 
@@ -98,23 +98,19 @@ users[3]{id,name,role}:
 
 ## Benchmarks
 
+For a typical paginated API response (50 records):
+- **JSON**: ~7,597 tokens
+- **TOON**: ~3,586 tokens
+- **Saved**: ~4,000 tokens per request
+
 Real-world benchmarks from a production application with 17,000+ records:
 
 | Data Type | JSON | TOON | Savings |
 |-----------|------|------|---------|
-| 50 records (nested objects) | 13,055 bytes | 5,080 bytes | **61%** |
-| 100 records (nested objects) | 26,156 bytes | 10,185 bytes | **61%** |
-| 500 records (nested objects) | 129,662 bytes | 49,561 bytes | **62%** |
-| 1,000 records (nested objects) | 258,965 bytes | 98,629 bytes | **62%** |
-| 100 records (mixed nesting) | 43,842 bytes | 26,267 bytes | **40%** |
-| Single object | 169 bytes | 124 bytes | **27%** |
-
-### Token Impact
-
-For a typical paginated API response (50 records):
-- **JSON**: ~3,274 tokens
-- **TOON**: ~1,279 tokens
-- **Saved**: ~2,000 tokens per request
+| 50 records | 30,389 bytes | 14,343 bytes | **53%** |
+| 100 records | 60,856 bytes | 28,498 bytes | **53%** |
+| 500 records | 303,549 bytes | 140,154 bytes | **54%** |
+| 1,000 records | 604,408 bytes | 277,614 bytes | **54%** |
 
 ## Features
 
@@ -345,7 +341,7 @@ This package implements the [TOON v3.0 specification](https://github.com/toon-fo
 composer test
 ```
 
-The test suite includes 121 tests covering encoding, decoding, nested object handling, and official spec compliance fixtures.
+The test suite includes 470 tests covering encoding, decoding, nested object handling, and official spec compliance fixtures.
 
 ## Requirements
 

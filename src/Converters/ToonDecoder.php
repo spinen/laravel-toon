@@ -36,7 +36,7 @@ class ToonDecoder
         $this->indent = (int) ($config['indent'] ?? 2);
         $this->strict = (bool) ($config['strict'] ?? true);
         $this->delimiter = (string) ($config['delimiter'] ?? ',');
-        $this->expandPaths = (string) ($config['expandPaths'] ?? 'off');
+        $this->expandPaths = (string) ($config['expand_paths'] ?? 'off');
     }
 
     protected function getLineIndent(string $line): int
@@ -70,7 +70,6 @@ class ToonDecoder
         $this->pos = 0;
         $this->quotedKeys = [];
 
-        // Empty input returns empty object
         $hasContent = false;
         foreach ($this->lines as $line) {
             if (trim($line) !== '') {
@@ -85,17 +84,12 @@ class ToonDecoder
 
         $result = $this->parseBlock(-1);
 
-        // Apply path expansion if enabled
         if ($this->expandPaths === 'safe' && is_array($result) && ! array_is_list($result)) {
             $result = $this->expandDottedPaths($result);
         }
 
-        // If the result is an array with sequential numeric keys and contains
-        // only one element that is NOT an associative array, return that element
-        // This handles single primitive values at root level
         if (array_is_list($result) && count($result) === 1) {
             $first = $result[0];
-            // Only unwrap if it's a primitive (not an array/object)
             if (! is_array($first)) {
                 return $first;
             }
@@ -109,12 +103,10 @@ class ToonDecoder
         $result = [];
 
         foreach ($obj as $key => $value) {
-            // Recursively expand nested objects first
             if (is_array($value) && ! array_is_list($value)) {
                 $value = $this->expandDottedPaths($value);
             }
 
-            // Check if key should be expanded (contains dots and all segments are valid identifiers)
             if ($this->shouldExpandKey((string) $key)) {
                 $this->setNestedValue($result, (string) $key, $value);
             } else {
@@ -127,7 +119,6 @@ class ToonDecoder
 
     protected function shouldExpandKey(string $key): bool
     {
-        // Don't expand keys that were originally quoted
         if (in_array($key, $this->quotedKeys, true)) {
             return false;
         }
@@ -138,7 +129,6 @@ class ToonDecoder
 
         $segments = explode('.', $key);
         foreach ($segments as $segment) {
-            // Each segment must be a valid identifier (letters, numbers, underscore, starting with letter/underscore)
             if (! preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $segment)) {
                 return false;
             }
@@ -158,11 +148,9 @@ class ToonDecoder
             if (! isset($current[$segment])) {
                 $current[$segment] = [];
             } elseif (! is_array($current[$segment])) {
-                // Conflict: trying to create nested path but value exists
                 if ($this->strict) {
                     throw ToonException::pathConflict($path);
                 }
-                // In non-strict mode, overwrite with object
                 $current[$segment] = [];
             }
 
@@ -183,7 +171,6 @@ class ToonDecoder
 
         $existing = $target[$key];
 
-        // Both are associative arrays - deep merge
         if (is_array($existing) && ! array_is_list($existing) && is_array($value) && ! array_is_list($value)) {
             foreach ($value as $k => $v) {
                 $this->mergeValue($target[$key], (string) $k, $v);
@@ -192,12 +179,10 @@ class ToonDecoder
             return;
         }
 
-        // Conflict: different types or primitives
         if ($this->strict) {
             throw ToonException::pathConflict($key);
         }
 
-        // Non-strict: last write wins
         $target[$key] = $value;
     }
 
@@ -221,7 +206,6 @@ class ToonDecoder
                 break;
             }
 
-            // Check for list item
             if (str_starts_with($content, '- ') || $content === '-') {
                 $itemContent = $content === '-' ? '' : substr($content, 2);
                 $this->pos++;
@@ -231,7 +215,6 @@ class ToonDecoder
                 continue;
             }
 
-            // Check for array header
             $arrayMatch = $this->parseArrayHeader($content);
             if ($arrayMatch !== null) {
                 $keyName = $arrayMatch['key'];
@@ -243,16 +226,12 @@ class ToonDecoder
                 $this->pos++;
 
                 if ($rowCount === 0) {
-                    // Empty array
                     $items = [];
                 } elseif ($inlineValues !== '' && $columns === []) {
-                    // Inline primitive array: key[N]: a,b,c
                     $items = $this->parseRow($inlineValues, $rowCount, $activeDelimiter);
                 } elseif ($columns !== []) {
-                    // Tabular array with columns
                     $items = $this->parseTabularRows($rowCount, $columns, $activeDelimiter, $indent);
                 } else {
-                    // List format array or simple rows
                     $items = $this->parseListOrRows($rowCount, $indent, $activeDelimiter);
                 }
 
@@ -267,7 +246,6 @@ class ToonDecoder
                 continue;
             }
 
-            // Check for nested object (key:)
             if (str_ends_with($content, ':') && ! $this->containsKeyValueSeparator($content)) {
                 $key = $this->parseKey(rtrim($content, ':'));
                 $this->pos++;
@@ -276,7 +254,6 @@ class ToonDecoder
                 continue;
             }
 
-            // Check for key-value pair
             if ($this->containsKeyValueSeparator($content)) {
                 [$key, $value] = $this->splitKeyValue($content);
                 $result[$this->parseKey($key)] = $this->parseValue($value);
@@ -285,12 +262,10 @@ class ToonDecoder
                 continue;
             }
 
-            // Plain value - in strict mode, non-list items in nested blocks need colons
             if ($this->strict && $minIndent >= 0) {
                 throw ToonException::missingSyntax('colon in key-value pair');
             }
 
-            // In strict mode at root level, multiple bare primitives is an error
             if ($this->strict && $minIndent < 0 && ! empty($result) && array_is_list($result)) {
                 $hasPrimitive = false;
                 foreach ($result as $item) {
@@ -313,12 +288,10 @@ class ToonDecoder
 
     protected function parseListItem(string $content, int $listIndent): mixed
     {
-        // Empty list item becomes empty object
         if ($content === '') {
             return [];
         }
 
-        // Check if it's an inline array: [N]: values or [N]{cols}: values
         $arrayMatch = $this->parseArrayHeader($content);
         if ($arrayMatch !== null) {
             $rowCount = $arrayMatch['count'];
@@ -338,7 +311,6 @@ class ToonDecoder
             }
 
             if ($keyName !== null) {
-                // It's an object with an array field, parse more fields
                 $obj = [$keyName => $items];
                 $this->parseObjectFields($obj, $listIndent);
 
@@ -348,7 +320,6 @@ class ToonDecoder
             return $items;
         }
 
-        // Check if it's a key-value pair (start of an object)
         if ($this->containsKeyValueSeparator($content)) {
             [$key, $value] = $this->splitKeyValue($content);
             $obj = [$this->parseKey($key) => $this->parseValue($value)];
@@ -357,7 +328,6 @@ class ToonDecoder
             return $obj;
         }
 
-        // Check for nested object key (key:) - containsKeyValueSeparator already returned above
         if (str_ends_with($content, ':')) {
             $key = $this->parseKey(rtrim($content, ':'));
             $obj = [$key => $this->parseBlock($listIndent + 2)];
@@ -366,7 +336,6 @@ class ToonDecoder
             return $obj;
         }
 
-        // It's a primitive value
         return $this->parseValue($content);
     }
 
@@ -384,12 +353,10 @@ class ToonDecoder
             $indent = $this->getLineIndent($line);
             $content = trim($line);
 
-            // Stop if we've dedented or hit another list item
             if ($indent <= $listIndent || str_starts_with($content, '- ') || $content === '-') {
                 break;
             }
 
-            // Check for array header within object
             $arrayMatch = $this->parseArrayHeader($content);
             if ($arrayMatch !== null) {
                 $keyName = $arrayMatch['key'];
@@ -417,7 +384,6 @@ class ToonDecoder
                 continue;
             }
 
-            // Check for nested object (key:)
             if (str_ends_with($content, ':') && ! $this->containsKeyValueSeparator($content)) {
                 $key = $this->parseKey(rtrim($content, ':'));
                 $this->pos++;
@@ -426,7 +392,6 @@ class ToonDecoder
                 continue;
             }
 
-            // Key-value pair
             if ($this->containsKeyValueSeparator($content)) {
                 [$key, $value] = $this->splitKeyValue($content);
                 $obj[$this->parseKey($key)] = $this->parseValue($value);
@@ -457,7 +422,6 @@ class ToonDecoder
                 continue;
             }
 
-            // In strict mode, detect delimiter mismatch
             if ($this->strict && count($columns) > 1) {
                 $this->validateRowDelimiter($rowContent, $delimiter);
             }
@@ -476,7 +440,6 @@ class ToonDecoder
             throw ToonException::arrayLengthMismatch($rowCount, count($rows));
         }
 
-        // In strict mode, check for extra rows beyond declared count
         if ($this->strict && $this->pos < $this->lineCount) {
             $nextLine = $this->lines[$this->pos];
             $nextContent = trim($nextLine);
@@ -627,15 +590,12 @@ class ToonDecoder
         ];
     }
 
-    protected function containsKeyValueSeparator(string $content): bool
+    protected function findUnquoted(string $content, string $needle): int|false
     {
-        if (! str_contains($content, ': ')) {
-            return false;
-        }
-
         $inQuotes = false;
         $escape = false;
         $len = strlen($content);
+        $needleLen = strlen($needle);
 
         for ($i = 0; $i < $len; $i++) {
             $char = $content[$i];
@@ -658,50 +618,32 @@ class ToonDecoder
                 continue;
             }
 
-            if (! $inQuotes && $char === ':' && isset($content[$i + 1]) && $content[$i + 1] === ' ') {
-                return true;
+            if (! $inQuotes && substr($content, $i, $needleLen) === $needle) {
+                return $i;
             }
         }
 
         return false;
     }
 
-    protected function splitKeyValue(string $content): array
+    protected function containsKeyValueSeparator(string $content): bool
     {
-        $inQuotes = false;
-        $escape = false;
-        $len = strlen($content);
-
-        for ($i = 0; $i < $len; $i++) {
-            $char = $content[$i];
-
-            if ($escape) {
-                $escape = false;
-
-                continue;
-            }
-
-            if ($char === '\\') {
-                $escape = true;
-
-                continue;
-            }
-
-            if ($char === '"') {
-                $inQuotes = ! $inQuotes;
-
-                continue;
-            }
-
-            if (! $inQuotes && $char === ':' && isset($content[$i + 1]) && $content[$i + 1] === ' ') {
-                return [
-                    substr($content, 0, $i),
-                    substr($content, $i + 2),
-                ];
-            }
+        if (! str_contains($content, ': ')) {
+            return false;
         }
 
-        return [$content, ''];
+        return $this->findUnquoted($content, ': ') !== false;
+    }
+
+    protected function splitKeyValue(string $content): array
+    {
+        $pos = $this->findUnquoted($content, ': ');
+
+        if ($pos === false) {
+            return [$content, ''];
+        }
+
+        return [substr($content, 0, $pos), substr($content, $pos + 2)];
     }
 
     protected function validateRowDelimiter(string $row, string $expectedDelimiter): void
@@ -726,37 +668,7 @@ class ToonDecoder
 
     protected function containsUnquotedDelimiter(string $content, string $delimiter): bool
     {
-        $inQuotes = false;
-        $escape = false;
-        $len = strlen($content);
-
-        for ($i = 0; $i < $len; $i++) {
-            $char = $content[$i];
-
-            if ($escape) {
-                $escape = false;
-
-                continue;
-            }
-
-            if ($char === '\\') {
-                $escape = true;
-
-                continue;
-            }
-
-            if ($char === '"') {
-                $inQuotes = ! $inQuotes;
-
-                continue;
-            }
-
-            if (! $inQuotes && $char === $delimiter) {
-                return true;
-            }
-        }
-
-        return false;
+        return $this->findUnquoted($content, $delimiter) !== false;
     }
 
     protected function parseRow(string $row, int $expectedCount, string $delimiter = ','): array

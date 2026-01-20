@@ -11,7 +11,9 @@ All notable changes to this project will be documented in this file.
 - Proper escape sequences within quoted strings (`\n`, `\r`, `\t`, `\"`, `\\`)
 - Delimiter support: comma (default), tab (`\t`), and pipe (`|`) via `delimiter` config option
 - Strict mode for decoding with validation errors via `strict` config option
-- Official specification test suite (65 compliance tests)
+- Key folding: collapse single-key nested objects into dot notation via `key_folding` config
+- Path expansion: expand dotted keys back to nested objects via `expand_paths` config
+- Official specification test fixtures from [toon-format/spec](https://github.com/toon-format/spec)
 - Inline primitive array format (`key[N]: a,b,c`)
 
 ### Changed
